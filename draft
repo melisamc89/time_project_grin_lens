@@ -1,0 +1,225 @@
+
+from scipy.stats import mannwhitneyu
+from statsmodels.stats.multitest import multipletests
+import seaborn as sns
+palette = ['purple', 'gold']
+raw_features =['Position', 'DirPosition', 'MovDir',
+       'Speed', 'Time', 'TrialID' ]
+#raw_features =['Position_zscore', 'DirPosition_zscore', 'MovDir_zscore',
+#       'Speed_zscore', 'Time_zcsore', 'TrialID_zscore' ]
+# Create subplots
+fig, axes = plt.subplots(1, len(raw_features), figsize=(3 * len(raw_features), 3))
+if len(raw_features) == 1:
+    axes = [axes]
+# Collect p-values
+pvals = []
+for feature in raw_features:
+    sup_vals = neuron_mi_df[neuron_mi_df['area'] == 'sup'][feature]
+    deep_vals = neuron_mi_df[neuron_mi_df['area'] == 'deep'][feature]
+
+    if len(sup_vals) > 0 and len(deep_vals) > 0:
+        stat, p = mannwhitneyu(sup_vals, deep_vals, alternative='two-sided')
+    else:
+        p = 1.0
+    pvals.append(p)
+
+# FDR correction
+corrected_pvals = multipletests(pvals, method='fdr_bh')[1]
+#corrected_pvals = pvals
+# Plot and annotate
+for i, (feature, p_corr) in enumerate(zip(raw_features, corrected_pvals)):
+    ax = axes[i]
+    sns.violinplot(data=neuron_mi_df, x='area', y=feature, palette=palette, ax=ax, cut=0)
+
+    # Y limits
+    ymax = neuron_mi_df[feature].max()
+    y_annot = 0.75 * ymax
+
+    # Significance label
+    if p_corr < 0.001:
+        sig = '***'
+    elif p_corr < 0.01:
+        sig = '**'
+    elif p_corr < 0.05:
+        sig = '*'
+    else:
+        sig = 'no'
+
+    # Add line + star if significant
+    if sig:
+        ax.plot([0, 1], [y_annot, y_annot], color='black', linewidth=1.2)
+        ax.text(0.5, y_annot + 0.02 * ymax, sig, ha='center', va='bottom', fontsize=14)
+
+    ax.set_title(feature)
+
+# Final layout
+fig.suptitle('MIR Features by Area Depth (Significance at 75% Height)', fontsize=16, y=1.05)
+plt.tight_layout()
+plt.savefig(os.path.join(figure_directory, f'MI_violin_significance_75percent.png'), dpi=400, bbox_inches="tight")
+plt.show()
+
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.manifold import TSNE
+from sklearn.cluster import KMeans
+
+df = neuron_mi_df.copy()
+z_cols = [col for col in df.columns if col.endswith('zscore')]
+z_cols = [col for col in df.columns if col in raw_features]
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(df[z_cols].values)
+
+raw_mi_values = {key: [] for key in ['Position', 'DirPosition', 'MovDir',
+       'Speed', 'Time', 'TrialID' ]}
+
+k = 3
+# Clustering
+kmeans = KMeans(n_clusters=k, random_state=42)
+df['cluster'] = kmeans.fit_predict(X_scaled)
+# Save clusters to each session
+
+tsne = TSNE(n_components=2, perplexity=20, learning_rate='auto', init='pca', random_state=42)
+X_tsne = tsne.fit_transform(X_scaled)
+df['tsne_1'], df['tsne_2'] = X_tsne[:, 0], X_tsne[:, 1]
+
+# Plotting
+fig, axes = plt.subplots(3, 4, figsize=(20, 14))  # Now 3 rows x 4 columns
+axes = axes.flatten()
+# Plot 1: Cluster
+sns.scatterplot(data=df, x='tsne_1', y='tsne_2', hue='cluster',
+                ax=axes[0], palette='tab10', s=40, alpha=0.8)
+axes[0].set_title('t-SNE (colored by cluster)')
+axes[0].legend(title='Cluster', bbox_to_anchor=(1.05, 1), loc='upper left')
+# Plot 2: Area
+sns.scatterplot(data=df, x='tsne_1', y='tsne_2', hue='area',
+                ax=axes[1], palette='Set2', s=40, alpha=0.8)
+axes[1].set_title('t-SNE (colored by area)')
+axes[1].legend(title='Area', bbox_to_anchor=(1.05, 1), loc='upper left')
+# ✅ Plot 3: Mouse ID
+sns.scatterplot(data=df, x='tsne_1', y='tsne_2', hue='mouse',
+                ax=axes[2], palette='tab20', s=40, alpha=0.8)
+axes[2].set_title('t-SNE (colored by mouse ID)')
+axes[2].legend(title='Mouse', bbox_to_anchor=(1.05, 1), loc='upper left')
+
+# Plot 4–10: Raw MI feature color coding
+raw_mi_cols = list(raw_mi_values.keys())
+for i, col in enumerate(raw_mi_cols):
+    ax = axes[i+3]  # shift by 3 because first three plots are cluster, area, and mouse ID
+    sc = ax.scatter(df['tsne_1'], df['tsne_2'], c=df[col],
+                    cmap='coolwarm', s=15, alpha=0.9, vmin=0, vmax=0.1)
+    ax.set_title(f't-SNE (colored by {col})')
+    plt.colorbar(sc, ax=ax, orientation='vertical', shrink=0.8)
+# Final layout
+fig.suptitle('t-SNE Embedding with Clustering, Area, Mouse ID, and Raw MI Features', fontsize=16)
+plt.tight_layout(rect=[0, 0, 1, 0.96])
+plt.savefig(os.path.join(figure_directory, f'MI_cluster_zscored.png'), dpi=400, bbox_inches="tight")
+plt.show()
+
+##################################################################################
+# Multiple k values
+##########################################################
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import os
+
+# Define color mapping
+area_colors = {
+    'sup': 'purple',
+    'deep': 'gold'
+}
+# Set up
+df_base = neuron_mi_df.copy()
+z_cols = [f'{col}' for col in raw_mi_values]
+scaler = StandardScaler()
+X_base = scaler.fit_transform(df_base[z_cols].values)
+
+k_values = [2, 3, 4, 5]
+
+# Run t-SNE once (same across clusterings)
+tsne = TSNE(n_components=2, perplexity=50, learning_rate='auto', init='pca', random_state=42)
+X_tsne = tsne.fit_transform(X_base)
+df_base['tsne_1'], df_base['tsne_2'] = X_tsne[:, 0], X_tsne[:, 1]
+
+# Run clustering for all k and store results
+for k in k_values:
+    kmeans = KMeans(n_clusters=k, random_state=42)
+    df_base[f'cluster_k{k}'] = kmeans.fit_predict(X_base)
+
+# --- Plotting ---
+raw_mi_cols = list(raw_mi_values.keys())
+n_cluster_plots = len(k_values)
+metadata_cols = ['area', 'mouse']
+n_metadata_plots = len(metadata_cols)
+n_feature_plots = len(raw_mi_cols)
+
+n_cols = 4
+n_rows = int(np.ceil((n_cluster_plots + n_metadata_plots + n_feature_plots) / n_cols))
+
+fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows))
+axes = axes.flatten()
+
+plot_idx = 0
+
+# Top row: Clustering results
+for k in k_values:
+    sns.scatterplot(data=df_base, x='tsne_1', y='tsne_2', hue=f'cluster_k{k}',
+                    ax=axes[plot_idx], palette='tab10', s=40, alpha=0.8)
+    axes[plot_idx].set_title(f't-SNE (cluster k={k})')
+    axes[plot_idx].legend(title=f'k={k}', bbox_to_anchor=(1.05, 1), loc='upper left')
+    plot_idx += 1
+
+# Metadata: area and mouse
+for meta_col in metadata_cols:
+    if meta_col == 'area':
+        use_palette = area_colors
+    else:
+        use_palette = 'tab20'
+    sns.scatterplot(data=df_base, x='tsne_1', y='tsne_2', hue=meta_col,
+                    ax=axes[plot_idx], palette=use_palette, s=40, alpha=0.8)
+    axes[plot_idx].set_title(f't-SNE (colored by {meta_col})')
+    axes[plot_idx].legend(title=meta_col, bbox_to_anchor=(1.05, 1), loc='upper left')
+    plot_idx += 1
+
+# Raw MI values
+for col in raw_mi_cols:
+    sc = axes[plot_idx].scatter(df_base['tsne_1'], df_base['tsne_2'], c=df_base[col],
+                                cmap='coolwarm', s=15, alpha=0.9, vmin=0, vmax=0.25)
+    axes[plot_idx].set_title(f't-SNE (colored by {col})')
+    plt.colorbar(sc, ax=axes[plot_idx], orientation='vertical', shrink=0.8)
+    plot_idx += 1
+
+# Turn off any unused axes
+for i in range(plot_idx, len(axes)):
+    axes[i].axis('off')
+
+# Final layout
+fig.suptitle('t-SNE Embedding with Clusterings (k=2-5), Metadata, and Raw MI Features', fontsize=18)
+plt.tight_layout(rect=[0, 0, 1, 0.96])
+plt.savefig(os.path.join(figure_directory, f'MI_cluster_k_overview.png'), dpi=400, bbox_inches="tight")
+plt.show()
+
+#########################################################################################################
+
+mi_position = neuron_mi_df['Position']
+mi_time = neuron_mi_df['Time']
+area = neuron_mi_df['area']
+# Color mapping
+color_map = {'deep': 'gold', 'sup': 'purple'}
+# Create figure
+plt.figure(figsize=(8,6))
+# Scatter plot
+for a in ['deep', 'sup']:
+    idx = [i for i, val in enumerate(area) if val == a]
+    plt.scatter([mi_position[i] for i in idx], [mi_time[i] for i in idx],
+                color=color_map[a], label=a, alpha=0.7)
+plt.xlabel('mi_pos')
+plt.ylabel('mi_time')
+plt.legend()
+plt.title('mi_pos vs mi_time colored by area')
+plt.grid(False)
+plt.show()
+
