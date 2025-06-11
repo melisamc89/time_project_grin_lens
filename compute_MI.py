@@ -25,12 +25,23 @@ import numpy as np
 
 # Your bands
 bands = {
-    'delta': (1.2, 4),
-    'theta': (6, 12),
-    'beta': (20, 40),
-    'gamma': (60, 150),
-    'high_gamma': (150, 250)
+    'infra-slow':(0.01,0.1),
+    'delta': (1, 3),
+    'theta': (8, 12),
+    'slow-gamma': (40, 90),
+    'high-gamma': (100, 250),
+    'MUA': (300, 1000)
 }
+
+from scipy.signal import hilbert, butter, filtfilt
+
+def bandpass_filter(data, lowcut, highcut, fs, order=4):
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
+    return filtfilt(b, a, data, axis=0)
+
 
 mice_list = list(data.keys())
 mi_dict = dict()
@@ -40,7 +51,7 @@ for mouse in mice_list:
 
     signal = mouse_data['clean_traces']
     speed = mouse_data['speed']
-    valid_index = np.where(speed > 6)[0]
+    valid_index = np.where(speed > 3)[0]
     signal = signal[valid_index,:]
     speed = speed[valid_index]
     pos = mouse_data['position'][valid_index,:]
@@ -65,34 +76,47 @@ for mouse in mice_list:
 
     mi_all = []
     mi_bands_all = []
+    lfp = mouse_data['lfp'][valid_index]
+    #lfp = lfp[:,0]
+    fs = 20  # Update this to your actual LFP sampling rate
+    # Assume LFP shape is (T, channels)
+    n_channels = lfp.shape[1]
+    mi_bands_all = {'amplitude': [], 'phase': []}
+
     for beh_index, beh in enumerate(behaviours_list):
         print('MI for variable:' + beh_names[beh_index])
         mi = []
         for neui in range(signal.shape[1]):
-            neuron_mi = \
-                mutual_info_regression(signal[:, neui].reshape(-1, 1), beh, n_neighbors=50,
-                                       random_state=16)[0]
+            neuron_mi = mutual_info_regression(signal[:, neui].reshape(-1, 1), beh, n_neighbors=50,
+                                                           random_state=16)[0]
             mi.append(neuron_mi)
-            # Store coherence per neuron and per band
-            if beh_index == 0:
-                frequencies = mouse_data['cwt_freqs']
-                lfp_wavelet = np.mean(mouse_data['cwt'],axis = 2)
+            if beh_index == 0:  # Only once per neuron
+                mi_amp_bands = []
+                mi_phase_bands = []
+                lfp_freqs = mouse_data['cwt_freqs']
+                lfp_wavelet = mouse_data['cwt']
                 lfp_wavelet = lfp_wavelet[valid_index,:]
-                mi_bands = []
-                for band_name, band_range in bands.items():
-                    band_min, band_max = bands[band_name]
-                    band_mask = (frequencies >= band_min) & (frequencies <= band_max)
+                for band_name, (fmin, fmax) in bands.items():
+                    # Filter LFP
+                    band_mask = (lfp_freqs >= fmin) & (lfp_freqs <= fmax)
+                    cwt_band = lfp_wavelet[:, band_mask, :]  # shape: [T, band_freqs, chans]
 
-                    # Select only frequencies in the band
-                    lfp_band = lfp_wavelet[:,band_mask]
-                    lfp_band = np.mean(lfp_band,axis = 1)
-                    neuron_mi_band = \
-                        mutual_info_regression(signal[:, neui].reshape(-1, 1), lfp_band, n_neighbors=50,
-                                               random_state=16)[0]
-                    mi_bands.append(neuron_mi_band)
-                mi_bands_all.append(mi_bands)
+                    # Mean across frequencies and channels
+                    cwt_band_mean = np.mean(cwt_band, axis=(1, 2))  # shape: [T], complex
+                    amp = cwt_band_mean # Equivalent to Hilbert envelope
+                    phase = np.angle(hilbert(cwt_band_mean))
+                    # Compute MI with clean trace
+                    amp_mi = mutual_info_regression(signal[:, neui].reshape(-1, 1), amp, n_neighbors=50,
+                                                                random_state=16)[0]
+                    phase_mi = mutual_info_regression(signal[:, neui].reshape(-1, 1), phase, n_neighbors=50,
+                                                                  random_state=16)[0]
+                    mi_amp_bands.append(amp_mi)
+                    mi_phase_bands.append(phase_mi)
+                mi_bands_all['amplitude'].append(mi_amp_bands)
+                mi_bands_all['phase'].append(mi_phase_bands)
         mi_all.append(mi)
-        mi_bands_all = np.array(mi_bands_all)
+    mi_dict[mouse]['MIR'] = mi_all
+    mi_dict[mouse]['MIR_bands'] = mi_bands_all
 
     # mi_final = np.hstack(mi_all)
     mi_dict[mouse]['behaviour'] = behaviour_dict
@@ -117,26 +141,40 @@ for mouse in mice_list:
     #with open(os.path.join(output_directory, mouse +'_mi_clean_traces_dict_alldir.pkl'), 'wb') as f:
     #    pkl.dump(mouse_dict, f)
 
-with open(os.path.join(output_directory,'mi_beh_mi_band.pkl'), 'wb') as f:
+with open(os.path.join(output_directory,'mi_beh_mi_band_hilbert.pkl'), 'wb') as f:
     pkl.dump(mi_dict, f)
 
+for mouse in mice_list:
+    mouse_dict = dict()
+    mouse_dict['lt'] = dict()
+    mouse_dict['lt']['behaviour'] = mi_dict[mouse]['behaviour']
+    mouse_dict['lt']['signal'] =  mi_dict[mouse]['signal']
+    mouse_dict['lt']['valid_index'] = mi_dict[mouse]['valid_index']
+    mouse_dict['lt']['MIR'] = mi_dict[mouse]['MIR']
+    mouse_dict['lt']['MIR_bands'] =  mi_dict[mouse]['MIR_bands']
+
+    moutput_directory = os.path.join(output_directory, mouse)
+    if not os.path.isdir(moutput_directory): os.makedirs(moutput_directory)
+
+    with open(os.path.join(output_directory, mouse +'_mi_beh_mi_band_hilbert.pkl'), 'wb') as f:
+        pkl.dump(mouse_dict, f)
 
 ########################################################################################################
-#
 ########################################################################################################
+
 import pandas as pd
 from scipy.stats import zscore
 import numpy as np
 
-with open(os.path.join(output_directory,'mi_beh_mi_band.pkl'), 'rb') as file:
+with open(os.path.join(output_directory,'mi_beh_mi_band_hilbert.pkl'), 'rb') as file:
     data = pkl.load(file)
 
 rows = []
-
 for mouse, mouse_data in mi_dict.items():
-    mir = mouse_data['MIR']  # List: one list per behavior, each list has MI values for all neurons
-    mir_band = mouse_data['MIR_bands'].T
-    n_neurons = len(mir[0])  # Number of neurons
+    mir = np.array(mouse_data['MIR']).T # List: one list per behavior, each list has MI values for all neurons
+    mir_band_amp = np.array(mouse_data['MIR_bands']['amplitude'])
+    mir_band_phase = np.array(mouse_data['MIR_bands']['phase'])
+    n_neurons = mir.shape[0]  # Number of neurons
 
     # Assign area based on mouse name
     if 'Calb' in mouse:
@@ -145,7 +183,7 @@ for mouse, mouse_data in mi_dict.items():
         area = 'deep'
     else:
         area = 'unknown'
-
+    print(n_neurons)
     for neuron_idx in range(n_neurons):
         row = {
             'mouse': mouse,
@@ -154,16 +192,20 @@ for mouse, mouse_data in mi_dict.items():
         }
         # Collect MI values for this neuron across behaviors
         mi_values = []
-        for beh_name, mi_list in zip(beh_names, mir):
+        for beh_name, mi_list in zip(beh_names, mir.T):
             mi_value = mi_list[neuron_idx]
             row[beh_name] = mi_value
             mi_values.append(mi_value)
         mi_values_band = []
-        for band_name, mi_list_band in zip(bands.keys(), mir_band):
+        for band_name, mi_list_band in zip(bands.keys(), mir_band_amp.T):
             mi_value = mi_list_band[neuron_idx]
-            row[band_name] = mi_value
+            row[band_name + '_amp'] = mi_value
             mi_values_band.append(mi_value)
-
+        mi_values_band_phase = []
+        for band_name, mi_list_band in zip(bands.keys(), mir_band_phase.T):
+            mi_value = mi_list_band[neuron_idx]
+            row[band_name + '_phase'] = mi_value
+            mi_values_band_phase.append(mi_value)
         # Compute z-scored MI values for this neuron
         mi_values = np.array(mi_values)
         mi_zscore = zscore(mi_values, nan_policy='omit')  # safe if NaNs exist
@@ -172,12 +214,19 @@ for mouse, mouse_data in mi_dict.items():
         mi_values_band = np.array(mi_values_band)
         mi_zscore_band = zscore(mi_values_band, nan_policy='omit')  # safe if NaNs exist
 
+        # Compute z-scored MI values for this neuron
+        mi_values_band_phase = np.array(mi_values_band_phase)
+        mi_zscore_band_phase = zscore(mi_values_band_phase, nan_policy='omit')  # safe if NaNs exist
+
         # Add z-scored MI values
         for beh_name, z_value in zip(beh_names, mi_zscore):
             row[f'{beh_name}_zscore'] = z_value
 
         for freq_band, z_val in zip(bands.keys(), mi_zscore_band):
-            row[f'{freq_band}_zscore'] = z_val
+            row[f'{freq_band}_amp_zscore'] = z_val
+
+        for freq_band, z_val in zip(bands.keys(), mi_zscore_band_phase):
+            row[f'{freq_band}_phase_zscore'] = z_val
 
         rows.append(row)
 
@@ -193,7 +242,11 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 # Define MI variables (behavior + frequency)
-mi_vars = beh_names + list(bands.keys())
+mi_vars = ['Position', 'DirPosition', 'MovDir',
+       'Speed', 'Time', 'InnerTime', 'TrialID', 'infra-slow_amp', 'delta_amp',
+       'theta_amp', 'slow-gamma_amp', 'high-gamma_amp', 'MUA_amp',
+       'infra-slow_phase', 'delta_phase', 'theta_phase', 'slow-gamma_phase',
+       'high-gamma_phase', 'MUA_phase']
 
 # Melt to long format for seaborn
 long_df = neuron_mi_df.melt(id_vars='area', value_vars=mi_vars,
@@ -222,7 +275,7 @@ plt.xlabel("Variable")
 plt.tight_layout()
 
 # Save
-violin_path = os.path.join(figure_directory, "MI_ViolinPlot_ByArea_SplitColor.png")
+violin_path = os.path.join(figure_directory, "MI_ViolinPlot.png")
 plt.savefig(violin_path, dpi=300)
 plt.close()
 
@@ -236,13 +289,15 @@ from scipy.stats import linregress
 
 # Frequency band order
 freq_order = bands.keys()
+n_beh = 7
+n_freq = 6
+lfp_variable = '_amp'
 
 # Prepare output directory
 figure_directory = os.path.join(base_directory, 'figures')
 os.makedirs(figure_directory, exist_ok=True)
 # Prepare to store per-area Pearson r values
 detailed_pearson_data = []
-
 fig, axs = plt.subplots(n_beh, n_freq, figsize=(4 * n_freq, 4 * n_beh), sharex=False, sharey=False)
 
 for i, beh in enumerate(beh_names):
@@ -250,9 +305,9 @@ for i, beh in enumerate(beh_names):
         ax = axs[i, j] if n_beh > 1 else axs[j]
 
         # Subset
-        df = neuron_mi_df[[beh, freq, 'area']].dropna()
+        df = neuron_mi_df[[beh, freq + lfp_variable, 'area']].dropna()
         x = df[beh].values
-        y = df[freq].values
+        y = df[freq + lfp_variable].values
         area = df['area'].values
 
         # Scatter colored by area
@@ -293,7 +348,7 @@ for i, beh in enumerate(beh_names):
 # Save scatter plot
 plt.tight_layout()
 fig.suptitle("MI vs Frequency Band MI by Area", fontsize=16, y=1.02)
-scatter_path = os.path.join(figure_directory, "MI_vs_Frequency_ScatterGrid_PearsonByArea.png")
+scatter_path = os.path.join(figure_directory,'MI_vs_Frequency_'+ lfp_variable+'.png')
 plt.savefig(scatter_path, dpi=300)
 plt.close()
 print(f"Saved color-coded scatter grid with Pearson r to: {scatter_path}")
@@ -331,96 +386,8 @@ for i, beh in enumerate(beh_names):
 axs[-1].set_xlabel("Frequency Band")
 
 plt.tight_layout()
-summary_path = os.path.join(figure_directory, "Pearson_r_vs_Frequency_ByArea_Subplots.png")
+summary_path = os.path.join(figure_directory, 'Pearson_r_vs_Frequency_ByArea_Subplots'+ lfp_variable +'.png')
 plt.savefig(summary_path, dpi=300)
 plt.close()
 
 print(f"Saved Pearson r per-behavior subplot figure to: {summary_path}")
-
-###########################CLUSTERS
-from sklearn.manifold import TSNE
-from sklearn.cluster import KMeans
-import matplotlib.pyplot as plt
-import numpy as np
-import os
-
-# Behavioral and frequency MI variable names
-zscore_beh_cols = [f"{b}_zscore" for b in beh_names]
-freq_cols = list(bands.keys())
-
-# Prepare valid data: drop NaNs in behavioral zscores
-zscore_data = neuron_mi_df[zscore_beh_cols].dropna()
-valid_indices = zscore_data.index
-
-# Get t-SNE embedding
-tsne = TSNE(n_components=2, perplexity=30, random_state=42)
-tsne_embedding = tsne.fit_transform(zscore_data.values)
-
-# Get area
-area = neuron_mi_df.loc[valid_indices, 'area'].values
-palette = {'sup': 'purple', 'deep': 'gold'}
-area_colors = [palette.get(a, 'gray') for a in area]
-
-# Run KMeans clustering
-kmeans_labels = {}
-for k in [2, 3, 4, 5]:
-    km = KMeans(n_clusters=k, random_state=42)
-    kmeans_labels[k] = km.fit_predict(zscore_data.values)
-
-# Total subplots
-n_beh = len(beh_names)
-n_freq = len(freq_cols)
-n_clusters = len(kmeans_labels)
-n_extra = 1  # for area
-n_total = n_beh + n_freq + n_clusters + n_extra
-
-# Grid dimensions
-n_cols = 4
-n_rows = int(np.ceil(n_total / n_cols))
-
-fig, axs = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False)
-
-# --- Plot behavioral MI coloring ---
-for i, beh in enumerate(beh_names):
-    ax = axs[i // n_cols, i % n_cols]
-    values = neuron_mi_df.loc[valid_indices, beh]
-    sc = ax.scatter(tsne_embedding[:, 0], tsne_embedding[:, 1], c=values,
-                    cmap='coolwarm', s=10, vmin=0, vmax=0.4)
-    ax.set_title(f"t-SNE colored by {beh}")
-    plt.colorbar(sc, ax=ax)
-
-# --- Plot frequency MI coloring ---
-offset = len(beh_names)
-for j, freq in enumerate(freq_cols):
-    ax = axs[(j + offset) // n_cols, (j + offset) % n_cols]
-    values = neuron_mi_df.loc[valid_indices, freq]
-    sc = ax.scatter(tsne_embedding[:, 0], tsne_embedding[:, 1], c=values,
-                    cmap='coolwarm', s=10, vmin=0, vmax=0.1)
-    ax.set_title(f"t-SNE colored by {freq}")
-    plt.colorbar(sc, ax=ax)
-
-# --- KMeans clusters (k = 2–5) ---
-offset += len(freq_cols)
-for idx, (k, labels) in enumerate(kmeans_labels.items()):
-    ax = axs[(idx + offset) // n_cols, (idx + offset) % n_cols]
-    ax.scatter(tsne_embedding[:, 0], tsne_embedding[:, 1], c=labels, cmap='tab10', s=10)
-    ax.set_title(f"KMeans Clusters (k={k})")
-
-# --- Area coloring ---
-final_idx = offset + len(kmeans_labels)
-ax = axs[final_idx // n_cols, final_idx % n_cols]
-ax.scatter(tsne_embedding[:, 0], tsne_embedding[:, 1], c=area_colors, s=10)
-ax.set_title("t-SNE colored by Area")
-
-# Clean up all axes
-for row in axs:
-    for ax in row:
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-plt.tight_layout()
-tsne_path = os.path.join(figure_directory, "tSNE_AllMI_Colored.png")
-plt.savefig(tsne_path, dpi=300)
-plt.close()
-
-print(f"Saved t-SNE figure with all MI variables to: {tsne_path}")
