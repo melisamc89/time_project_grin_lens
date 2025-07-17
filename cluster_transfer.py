@@ -189,11 +189,12 @@ import numpy as np
 import pandas as pd
 import pickle
 from scipy.stats import zscore
+
 base_directory = '/home/melma31/Documents/time_project_grin_lens'
 
-# Your bands
+# Define frequency bands
 bands = {
-    'infra-slow':(0.01,0.1),
+    'infra-slow': (0.01, 0.1),
     'delta': (1, 3),
     'theta': (8, 12),
     'slow-gamma': (40, 90),
@@ -203,23 +204,27 @@ bands = {
 
 # Setup
 data_dir = os.path.join(base_directory, 'output')
-signal_name = 'beh_mi_band_hilbert'
+signal_name = 'beh_mi_band_hilbert_shuffle'
 mice_files = [f for f in os.listdir(data_dir) if f.endswith(f'_mi_{signal_name}.pkl')]
 
-# Behavioral keys expected
-behavior_keys = ['position', '(pos,dir)', 'mov_dir', 'speed', 'time', 'inner_time', 'trial_id']
+# Behavioral keys
+behavior_keys = ['Position', 'DirPosition', 'MovDir', 'Speed', 'Time', 'InnerTime', 'TrialID']
+
+# Prepare storage
 raw_mi_values = {key: [] for key in behavior_keys}
 z_mi_values = {f'z_{key}': [] for key in behavior_keys}
+sig_flags = {f'{key}_sig': [] for key in behavior_keys}
 
-# Phase and amplitude band MI values
-band_names = bands.keys()
+band_names = list(bands.keys())
 amp_bands = {f'{b}_amp': [] for b in band_names}
 phase_bands = {f'{b}_phase': [] for b in band_names}
+sig_amp_flags = {f'{b}_amp_sig': [] for b in band_names}
+sig_phase_flags = {f'{b}_phase_sig': [] for b in band_names}
 
 # Metadata
 mouse_list, area_list, session_type_list = [], [], []
 
-# Loop through files
+# Process each file
 for file in mice_files:
     mouse = file.split('_mi_')[0]
     with open(os.path.join(data_dir, file), 'rb') as f:
@@ -228,32 +233,48 @@ for file in mice_files:
     if 'lt' not in mouse_dict:
         continue
 
-    data = np.array(mouse_dict['lt']['MIR'])  # shape: [num_behaviors, num_neurons]
+    data = np.array(mouse_dict['lt']['MIR'])  # shape: (7, n_neurons)
     data_z = zscore(data, axis=1)
 
-    mir_bands = mouse_dict['lt']['MIR_bands']  # dict with 'amplitude' and 'phase'
-    amp = np.array(mir_bands['amplitude'])  # shape: [num_neurons, num_bands]
-    phase = np.array(mir_bands['phase'])    # shape: [num_neurons, num_bands]
+    mir_bands = mouse_dict['lt']['MIR_bands']
+    amp = np.array(mir_bands['amplitude'])  # shape: (n_neurons, 6)
+    phase = np.array(mir_bands['phase'])    # shape: (n_neurons, 6)
+
+    mir_shuffle = np.array(mouse_dict['lt']['MIR_shuffle'])  # shape: (100, n_neurons, 7)
+    amp_shuffle = np.array(mouse_dict['lt']['MIR_bands_shuffle']['amplitude'])  # shape: (100, n_neurons, 6)
+    phase_shuffle = np.array(mouse_dict['lt']['MIR_bands_shuffle']['phase'])    # shape: (100, n_neurons, 6)
 
     num_neurons = data.shape[1]
 
     for neuron in range(num_neurons):
         mouse_list.append(mouse)
-        if 'Calb' in mouse:
-            area_list.append('superficial')
-        elif 'Thy1' in mouse:
-            area_list.append('deep')
+        area_list.append('superficial' if 'Calb' in mouse else 'deep')
         session_type_list.append('lt')
 
+        # Behavioral MI values
         for i, key in enumerate(behavior_keys):
-            raw_mi_values[key].append(data[i][neuron])
+            real_val = data[i][neuron]
+            shuffle_vals = mir_shuffle[:, i, neuron]
+            thresh = np.percentile(shuffle_vals, 95)
+
+            raw_mi_values[key].append(real_val)
             z_mi_values[f'z_{key}'].append(data_z[i][neuron])
+            sig_flags[f'{key}_sig'].append('s' if real_val > thresh else 'n')
 
+        # Band amplitude and phase MI values
         for j, b in enumerate(band_names):
-            amp_bands[f'{b}_amp'].append(amp[neuron][j])
-            phase_bands[f'{b}_phase'].append(phase[neuron][j])
+            real_amp = amp[neuron][j]
+            real_phase = phase[neuron][j]
+            amp_shuffle_vals = amp_shuffle[:, neuron, j]
+            phase_shuffle_vals = phase_shuffle[:, neuron, j]
 
-# Create DataFrame
+            amp_bands[f'{b}_amp'].append(real_amp)
+            phase_bands[f'{b}_phase'].append(real_phase)
+
+            sig_amp_flags[f'{b}_amp_sig'].append('s' if real_amp > np.percentile(amp_shuffle_vals, 95) else 'n')
+            sig_phase_flags[f'{b}_phase_sig'].append('s' if real_phase > np.percentile(phase_shuffle_vals, 95) else 'n')
+
+# Combine all into a single DataFrame
 mi_pd = pd.DataFrame({
     'mouse': mouse_list,
     'area': area_list,
@@ -261,8 +282,16 @@ mi_pd = pd.DataFrame({
     **raw_mi_values,
     **z_mi_values,
     **amp_bands,
-    **phase_bands
+    **phase_bands,
+    **sig_flags,
+    **sig_amp_flags,
+    **sig_phase_flags
 })
+
+# Optional: save to file
+# mi_pd.to_pickle(os.path.join(base_directory, 'mi_significance_flags.pkl'))
+# Optional: save to disk
+# mi_pd.to_pickle(os.path.join(base_directory, 'mi_significant_df.pkl'))
 
 # Total MI (sum over behavioral labels)
 mi_pd['total_MI'] = mi_pd[[*raw_mi_values]].sum(axis=1)
@@ -303,6 +332,242 @@ for cid in range(k):
 
 # 7 Store cluster labels in the dataframe
 mi_pd_lt['transferred_cluster'] = final_labels
+
+################################################################################################################
+#################                        STARTS PLOTTING                                ########################
+################################################################################################################
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from statannotations.Annotator import Annotator
+# Define amplitude columns
+amp_columns = ['infra-slow_amp', 'delta_amp', 'theta_amp', 'slow-gamma_amp', 'high-gamma_amp', 'MUA_amp']
+sig_columns = [f'{col}_sig' for col in amp_columns]
+# Custom cluster color palette
+custom_cluster_palette = {
+    0: '#bce784ff',  # light green
+    1: '#66cef4ff',  # light blue
+    2: '#ec8ef8ff'   # light pink
+}
+# Prepare long-format dataframe with per-feature significance filtering
+plot_data = []
+for amp_col, sig_col in zip(amp_columns, sig_columns):
+    sub_df = mi_pd_lt[
+        (mi_pd_lt['transferred_cluster'].isin(custom_cluster_palette.keys())) &
+        (mi_pd_lt[sig_col] == 's') &
+        (~mi_pd_lt[amp_col].isna())
+    ]
+    melted = pd.DataFrame({
+        'transferred_cluster': sub_df['transferred_cluster'],
+        'Frequency Band': amp_col,
+        'Amplitude': sub_df[amp_col]
+    })
+    plot_data.append(melted)
+df_amp_melted = pd.concat(plot_data, ignore_index=True)
+# Plot
+plt.figure(figsize=(12, 6))
+ax = sns.boxplot(data=df_amp_melted, x='Frequency Band', y='Amplitude',
+                 hue='transferred_cluster', palette=custom_cluster_palette)
+# Create all cluster pair combinations per band
+cluster_vals = sorted(df_amp_melted['transferred_cluster'].unique())
+pairs = []
+for band in amp_columns:
+    for i in range(len(cluster_vals)):
+        for j in range(i + 1, len(cluster_vals)):
+            pairs.append(((band, cluster_vals[i]), (band, cluster_vals[j])))
+# Annotate stats
+annotator = Annotator(ax, pairs, data=df_amp_melted,
+                      x='Frequency Band', y='Amplitude', hue='transferred_cluster')
+annotator.configure(test='t-test_ind', text_format='star', loc='inside', verbose=0)
+annotator.apply_and_annotate()
+plt.title('Amplitude by Cluster (Only Feature-Specific Significant Values)')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_lfp_amp_{imaging_data}.png'), dpi=400, bbox_inches="tight")
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_lfp_amp_{imaging_data}.svg'), dpi=400, bbox_inches="tight")
+
+plt.show()
+
+# Define MIR columns and their significance labels
+mir_columns = ['Position', 'DirPosition', 'MovDir', 'Speed', 'Time', 'InnerTime', 'TrialID']
+mir_sig_columns = [f'{col}_sig' for col in mir_columns]
+
+# Prepare long-format dataframe with per-feature significance filtering
+plot_data_mir = []
+
+for mir_col, sig_col in zip(mir_columns, mir_sig_columns):
+    sub_df = mi_pd_lt[
+        (mi_pd_lt['transferred_cluster'].isin(custom_cluster_palette.keys())) &
+        (mi_pd_lt[sig_col] == 's') &
+        (~mi_pd_lt[mir_col].isna())
+    ]
+    melted = pd.DataFrame({
+        'transferred_cluster': sub_df['transferred_cluster'],
+        'Feature': mir_col,
+        'MI': sub_df[mir_col]
+    })
+    plot_data_mir.append(melted)
+
+df_mir_melted = pd.concat(plot_data_mir, ignore_index=True)
+
+# Plot
+plt.figure(figsize=(12, 6))
+ax = sns.boxplot(data=df_mir_melted, x='Feature', y='MI',
+                 hue='transferred_cluster', palette=custom_cluster_palette)
+
+# Cluster pairs for annotations
+cluster_vals = sorted(df_mir_melted['transferred_cluster'].unique())
+pairs = []
+for feat in mir_columns:
+    for i in range(len(cluster_vals)):
+        for j in range(i + 1, len(cluster_vals)):
+            pairs.append(((feat, cluster_vals[i]), (feat, cluster_vals[j])))
+
+# Annotate
+annotator = Annotator(ax, pairs, data=df_mir_melted,
+                      x='Feature', y='MI', hue='transferred_cluster')
+annotator.configure(test='t-test_ind', text_format='star', loc='inside', verbose=0)
+annotator.apply_and_annotate()
+
+plt.title('Behavioral MI by Cluster (Only Feature-Specific Significant Values)')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_beh_{imaging_data}.png'), dpi=400, bbox_inches="tight")
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_beh_{imaging_data}.svg'), dpi=400, bbox_inches="tight")
+plt.show()
+
+# Define phase columns and significance labels
+phase_columns = ['infra-slow_phase', 'delta_phase', 'theta_phase',
+                 'slow-gamma_phase', 'high-gamma_phase', 'MUA_phase']
+phase_sig_columns = [f'{col}_sig' for col in phase_columns]
+
+# Prepare long-format dataframe with per-feature significance filtering
+plot_data_phase = []
+
+for phase_col, sig_col in zip(phase_columns, phase_sig_columns):
+    sub_df = mi_pd_lt[
+        (mi_pd_lt['transferred_cluster'].isin(custom_cluster_palette.keys())) &
+        (mi_pd_lt[sig_col] == 's') &
+        (~mi_pd_lt[phase_col].isna())
+    ]
+    melted = pd.DataFrame({
+        'transferred_cluster': sub_df['transferred_cluster'],
+        'Frequency Band': phase_col,
+        'Phase MI': sub_df[phase_col]
+    })
+    plot_data_phase.append(melted)
+
+df_phase_melted = pd.concat(plot_data_phase, ignore_index=True)
+
+# Plot
+plt.figure(figsize=(12, 6))
+ax = sns.boxplot(data=df_phase_melted, x='Frequency Band', y='Phase MI',
+                 hue='transferred_cluster', palette=custom_cluster_palette)
+
+# Cluster pairs for annotations
+cluster_vals = sorted(df_phase_melted['transferred_cluster'].unique())
+pairs = []
+for band in phase_columns:
+    for i in range(len(cluster_vals)):
+        for j in range(i + 1, len(cluster_vals)):
+            pairs.append(((band, cluster_vals[i]), (band, cluster_vals[j])))
+
+# Annotate
+annotator = Annotator(ax, pairs, data=df_phase_melted,
+                      x='Frequency Band', y='Phase MI', hue='transferred_cluster')
+annotator.configure(test='t-test_ind', text_format='star', loc='inside', verbose=0)
+annotator.apply_and_annotate()
+
+plt.title('Phase MI by Cluster (Only Feature-Specific Significant Values)')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_phase_{imaging_data}.png'), dpi=400, bbox_inches="tight")
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_phase_{imaging_data}.svg'), dpi=400, bbox_inches="tight")
+plt.show()
+
+import matplotlib.pyplot as plt
+
+mir_columns = ['Position', 'DirPosition', 'MovDir', 'Speed', 'Time', 'InnerTime', 'TrialID']
+cluster_ids = sorted(mi_pd_lt['transferred_cluster'].unique())
+cluster_ids = [cid for cid in cluster_ids if cid in custom_cluster_palette]  # exclude -10, -1, etc.
+
+mir_sig_df = []
+
+for feature in mir_columns:
+    sig_col = f'{feature}_sig'
+    for cluster in cluster_ids:
+        cluster_mask = mi_pd_lt['transferred_cluster'] == cluster
+        total = cluster_mask.sum()
+        sig_count = ((mi_pd_lt[sig_col] == 's') & cluster_mask).sum()
+        perc = 100 * sig_count / total if total > 0 else 0
+        mir_sig_df.append({'Feature': feature, 'Cluster': cluster, 'Percentage': perc})
+
+mir_sig_df = pd.DataFrame(mir_sig_df)
+
+# Plot
+plt.figure(figsize=(10, 5))
+sns.barplot(data=mir_sig_df, x='Feature', y='Percentage', hue='Cluster', palette=custom_cluster_palette)
+plt.title('Percentage of Significant Behavioral MI Neurons per Cluster')
+plt.xticks(rotation=45)
+plt.ylim(0, 100)
+plt.tight_layout()
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_behaviour_{imaging_data}_pecentage.png'), dpi=400, bbox_inches="tight")
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_behaviour_{imaging_data}_percentage.svg'), dpi=400, bbox_inches="tight")
+plt.show()
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Amplitude features
+amp_columns = ['infra-slow_amp', 'delta_amp', 'theta_amp',
+               'slow-gamma_amp', 'high-gamma_amp', 'MUA_amp']
+amp_sig_df = []
+for feature in amp_columns:
+    sig_col = f'{feature}_sig'
+    for cluster in cluster_ids:
+        cluster_mask = mi_pd_lt['transferred_cluster'] == cluster
+        total = cluster_mask.sum()
+        sig_count = ((mi_pd_lt[sig_col] == 's') & cluster_mask).sum()
+        perc = 100 * sig_count / total if total > 0 else 0
+        amp_sig_df.append({'Band': feature.replace('_amp', ''), 'Cluster': cluster, 'Percentage': perc})
+amp_sig_df = pd.DataFrame(amp_sig_df)
+# Plot
+plt.figure(figsize=(10, 5))
+sns.barplot(data=amp_sig_df, x='Band', y='Percentage', hue='Cluster', palette=custom_cluster_palette)
+plt.title('Percentage of Neurons with Significant Amplitude MI per Cluster')
+plt.ylim(0, 100)
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_amplitude_{imaging_data}_pecentage.png'), dpi=400, bbox_inches="tight")
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_amplitude_{imaging_data}_percentage.svg'), dpi=400, bbox_inches="tight")
+plt.show()
+
+# Phase features
+phase_columns = ['infra-slow_phase', 'delta_phase', 'theta_phase',
+                 'slow-gamma_phase', 'high-gamma_phase', 'MUA_phase']
+phase_sig_df = []
+for feature in phase_columns:
+    sig_col = f'{feature}_sig'
+    for cluster in cluster_ids:
+        cluster_mask = mi_pd_lt['transferred_cluster'] == cluster
+        total = cluster_mask.sum()
+        sig_count = ((mi_pd_lt[sig_col] == 's') & cluster_mask).sum()
+        perc = 100 * sig_count / total if total > 0 else 0
+        phase_sig_df.append({'Band': feature.replace('_phase', ''), 'Cluster': cluster, 'Percentage': perc})
+phase_sig_df = pd.DataFrame(phase_sig_df)
+# Plot
+plt.figure(figsize=(10, 5))
+sns.barplot(data=phase_sig_df, x='Band', y='Percentage', hue='Cluster', palette=custom_cluster_palette)
+plt.title('Percentage of Neurons with Significant Phase MI per Cluster')
+plt.ylim(0, 100)
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_phase_{imaging_data}_pecentage.png'), dpi=400, bbox_inches="tight")
+plt.savefig(os.path.join(data_dir, f'MI_transferred_cluster_all_{signal_name}_area_mouse_phase_{imaging_data}_percentage.svg'), dpi=400, bbox_inches="tight")
+plt.show()
+
+####################################################################
 
 
 import matplotlib.pyplot as plt
@@ -362,7 +627,6 @@ import seaborn as sns
 from scipy.stats import pearsonr
 from itertools import product
 # Behavioral keys expected
-behavior_keys = ['position', '(pos,dir)', 'mov_dir', 'speed', 'time', 'inner_time', 'trial_id']
 raw_mi_values = {key: [] for key in behavior_keys}
 z_mi_values = {f'z_{key}': [] for key in behavior_keys}
 
@@ -370,10 +634,9 @@ z_mi_values = {f'z_{key}': [] for key in behavior_keys}
 fig_dir = os.path.join(data_dir, 'figures')
 os.makedirs(fig_dir, exist_ok=True)
 
-# Colors
-color_all = 'black'
-color_deep = 'gold'
-color_sup = 'purple'
+color_all = '#bbbcc0ff'
+color_deep = '#cc9900'
+color_sup = '#9900ff'
 
 # Storage for correlations
 corrs_amp = {k: {'all': [], 'deep': [], 'sup': []} for k in behavior_keys}
@@ -477,7 +740,7 @@ valid_mask = mi_pd_lt['transferred_cluster'] != -10
 mi_pd_lt= mi_pd_lt[valid_mask].copy()
 
 # Define color map for clusters
-cluster_palette = {0: 'lightgreen', 1: 'lightblue', 2: 'dimgray'}
+cluster_palette = custom_cluster_palette
 
 # Make sure the output directory exists
 cluster_fig_dir = os.path.join(data_dir, 'figures', 'by_cluster')

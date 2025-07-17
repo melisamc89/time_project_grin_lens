@@ -8,6 +8,10 @@ from general_utils import *
 import pickle
 import matplotlib.pyplot as plt
 import pickle as pkl
+import random
+
+def circular_shuffle(data, split_idx):
+    return np.concatenate((data[split_idx:], data[:split_idx]), axis=0)
 
 
 base_directory = '/home/melma31/Documents/time_project_grin_lens'
@@ -29,7 +33,7 @@ bands = {
     'delta': (1, 3),
     'theta': (8, 12),
     'slow-gamma': (40, 90),
-    'high-gamma': (100, 250),
+    'ripple-band': (100, 250),
     'MUA': (300, 1000)
 }
 
@@ -77,9 +81,7 @@ for mouse in mice_list:
     mi_all = []
     mi_bands_all = []
     lfp = mouse_data['lfp'][valid_index]
-    #lfp = lfp[:,0]
-    fs = 20  # Update this to your actual LFP sampling rate
-    # Assume LFP shape is (T, channels)
+    fs = 20
     n_channels = lfp.shape[1]
     mi_bands_all = {'amplitude': [], 'phase': []}
 
@@ -97,15 +99,15 @@ for mouse in mice_list:
                 lfp_wavelet = mouse_data['cwt']
                 lfp_wavelet = lfp_wavelet[valid_index,:]
                 for band_name, (fmin, fmax) in bands.items():
-                    # Filter LFP
+                    # Filter LFP (actually take the )
                     band_mask = (lfp_freqs >= fmin) & (lfp_freqs <= fmax)
                     cwt_band = lfp_wavelet[:, band_mask, :]  # shape: [T, band_freqs, chans]
 
                     # Mean across frequencies and channels
-                    cwt_band_mean = np.mean(cwt_band, axis=(1, 2))  # shape: [T], complex
+                    cwt_band_mean = np.mean(cwt_band, axis=(1, 2))
                     amp = cwt_band_mean # Equivalent to Hilbert envelope
                     phase = np.angle(hilbert(cwt_band_mean))
-                    # Compute MI with clean trace
+                    # Compute MI with raw trace (not shuffle)
                     amp_mi = mutual_info_regression(signal[:, neui].reshape(-1, 1), amp, n_neighbors=50,
                                                                 random_state=16)[0]
                     phase_mi = mutual_info_regression(signal[:, neui].reshape(-1, 1), phase, n_neighbors=50,
@@ -115,8 +117,60 @@ for mouse in mice_list:
                 mi_bands_all['amplitude'].append(mi_amp_bands)
                 mi_bands_all['phase'].append(mi_phase_bands)
         mi_all.append(mi)
-    mi_dict[mouse]['MIR'] = mi_all
-    mi_dict[mouse]['MIR_bands'] = mi_bands_all
+
+    n_shuffles = 100
+    mir_shuffle_all = []
+    mir_bands_shuffle_all = {'amplitude': [], 'phase': []}
+
+    for shuffle_idx in range(n_shuffles):
+        print(f"Shuffling iteration {shuffle_idx + 1}/{n_shuffles}")
+        #cut_idx = np.random.randint(1, signal.shape[0] - 1)
+        #shuffled_signal = circular_shuffle(signal, cut_idx)
+
+        shuffled_signal = signal.copy()
+        np.random.shuffle(shuffled_signal)
+
+        mi_shuffle_behaviors = []
+        mi_amp_band_shuffle = []
+        mi_phase_band_shuffle = []
+
+        for beh in behaviours_list:
+            mi_shuffle = []
+            for neui in range(signal.shape[1]):
+                neuron_mi = mutual_info_regression(shuffled_signal[:, neui].reshape(-1, 1), beh, n_neighbors=50,
+                                                   random_state=16)[0]
+                mi_shuffle.append(neuron_mi)
+            mi_shuffle_behaviors.append(mi_shuffle)
+
+        for neui in range(signal.shape[1]):
+            mi_amp_bands = []
+            mi_phase_bands = []
+            for band_name, (fmin, fmax) in bands.items():
+                band_mask = (lfp_freqs >= fmin) & (lfp_freqs <= fmax)
+                cwt_band = lfp_wavelet[:, band_mask, :]  # shape: [T, band_freqs, chans]
+                cwt_band_mean = np.mean(cwt_band, axis=(1, 2))
+                amp = cwt_band_mean
+                phase = np.angle(hilbert(cwt_band_mean))
+
+                amp_mi = mutual_info_regression(shuffled_signal[:, neui].reshape(-1, 1), amp, n_neighbors=50,
+                                                random_state=16)[0]
+                phase_mi = mutual_info_regression(shuffled_signal[:, neui].reshape(-1, 1), phase, n_neighbors=16)[0]
+
+                mi_amp_bands.append(amp_mi)
+                mi_phase_bands.append(phase_mi)
+            mi_amp_band_shuffle.append(mi_amp_bands)
+            mi_phase_band_shuffle.append(mi_phase_bands)
+
+        mir_shuffle_all.append(mi_shuffle_behaviors)
+        mir_bands_shuffle_all['amplitude'].append(mi_amp_band_shuffle)
+        mir_bands_shuffle_all['phase'].append(mi_phase_band_shuffle)
+
+    # Save the mean over all 100 shuffles
+    mi_dict[mouse]['MIR_shuffle'] = np.array(mir_shuffle_all)
+    mi_dict[mouse]['MIR_bands_shuffle'] = {
+        'amplitude': np.array(mir_bands_shuffle_all['amplitude']),
+        'phase': np.array(mir_bands_shuffle_all['phase'])
+    }
 
     # mi_final = np.hstack(mi_all)
     mi_dict[mouse]['behaviour'] = behaviour_dict
@@ -141,7 +195,7 @@ for mouse in mice_list:
     #with open(os.path.join(output_directory, mouse +'_mi_clean_traces_dict_alldir.pkl'), 'wb') as f:
     #    pkl.dump(mouse_dict, f)
 
-with open(os.path.join(output_directory,'mi_beh_mi_band_hilbert.pkl'), 'wb') as f:
+with open(os.path.join(output_directory,'mi_beh_mi_band_hilbert_shuffle.pkl'), 'wb') as f:
     pkl.dump(mi_dict, f)
 
 for mouse in mice_list:
@@ -152,85 +206,101 @@ for mouse in mice_list:
     mouse_dict['lt']['valid_index'] = mi_dict[mouse]['valid_index']
     mouse_dict['lt']['MIR'] = mi_dict[mouse]['MIR']
     mouse_dict['lt']['MIR_bands'] =  mi_dict[mouse]['MIR_bands']
-
+    # Save the mean over all 100 shuffles
+    mouse_dict['lt']['MIR_shuffle'] = mi_dict[mouse]['MIR_shuffle']
+    mouse_dict['lt']['MIR_bands_shuffle'] = {
+        'amplitude': np.array(mi_dict[mouse]['MIR_bands_shuffle']['amplitude']),
+        'phase': np.array(mi_dict[mouse]['MIR_bands_shuffle']['amplitude'])
+    }
     moutput_directory = os.path.join(output_directory, mouse)
     if not os.path.isdir(moutput_directory): os.makedirs(moutput_directory)
 
-    with open(os.path.join(output_directory, mouse +'_mi_beh_mi_band_hilbert.pkl'), 'wb') as f:
+    with open(os.path.join(output_directory, mouse +'_mi_beh_mi_band_hilbert_shuffle.pkl'), 'wb') as f:
         pkl.dump(mouse_dict, f)
 
 ########################################################################################################
+#
+# CREATING DF AND PLOTTING
+#
 ########################################################################################################
-
 import pandas as pd
 from scipy.stats import zscore
 import numpy as np
+import os
+import pickle as pkl
 
-with open(os.path.join(output_directory,'mi_beh_mi_band_hilbert.pkl'), 'rb') as file:
+with open(os.path.join(output_directory,'mi_beh_mi_band_hilbert_shuffle.pkl'), 'rb') as file:
     data = pkl.load(file)
 
 rows = []
-for mouse, mouse_data in mi_dict.items():
-    mir = np.array(mouse_data['MIR']).T # List: one list per behavior, each list has MI values for all neurons
+for mouse, mouse_data in data.items():
+    mir = np.array(mouse_data['MIR']).T
     mir_band_amp = np.array(mouse_data['MIR_bands']['amplitude'])
     mir_band_phase = np.array(mouse_data['MIR_bands']['phase'])
-    n_neurons = mir.shape[0]  # Number of neurons
 
-    # Assign area based on mouse name
+    mir_shuffle = np.array(mouse_data['MIR_shuffle'])  # shape: (100, n_neurons, 7)
+    mir_band_amp_shuffle = np.array(mouse_data['MIR_bands_shuffle']['amplitude'])  # (100, n_neurons, 6)
+    mir_band_phase_shuffle = np.array(mouse_data['MIR_bands_shuffle']['phase'])  # (100, n_neurons, 6)
+    n_neurons = mir.shape[0]
+
     if 'Calb' in mouse:
         area = 'sup'
     elif 'Thy' in mouse:
         area = 'deep'
     else:
         area = 'unknown'
-    print(n_neurons)
+
     for neuron_idx in range(n_neurons):
         row = {
             'mouse': mouse,
             'neuron_idx': neuron_idx,
             'area': area
         }
-        # Collect MI values for this neuron across behaviors
+
+        # Behavior-related MI
         mi_values = []
-        for beh_name, mi_list in zip(beh_names, mir.T):
+        for i, (beh_name, mi_list) in enumerate(zip(beh_names, mir.T)):
             mi_value = mi_list[neuron_idx]
+            shuffle_vals = mir_shuffle[:, i,i]
+            signif = 's' if mi_value > np.percentile(shuffle_vals, 95) else 'n'
             row[beh_name] = mi_value
+            row[f'{beh_name}_significance'] = signif
             mi_values.append(mi_value)
+
+        # Band amplitude MI
         mi_values_band = []
-        for band_name, mi_list_band in zip(bands.keys(), mir_band_amp.T):
+        for i, (band_name, mi_list_band) in enumerate(zip(bands.keys(), mir_band_amp.T)):
             mi_value = mi_list_band[neuron_idx]
+            shuffle_vals = mir_band_amp_shuffle[:, neuron_idx,i]
+            signif = 's' if mi_value > np.percentile(shuffle_vals, 95) else 'n'
             row[band_name + '_amp'] = mi_value
+            row[band_name + '_amp_significance'] = signif
             mi_values_band.append(mi_value)
+
+        # Band phase MI
         mi_values_band_phase = []
-        for band_name, mi_list_band in zip(bands.keys(), mir_band_phase.T):
+        for i, (band_name, mi_list_band) in enumerate(zip(bands.keys(), mir_band_phase.T)):
             mi_value = mi_list_band[neuron_idx]
+            shuffle_vals = mir_band_phase_shuffle[:, neuron_idx,i]
+            signif = 's' if mi_value > np.percentile(shuffle_vals, 95) else 'n'
             row[band_name + '_phase'] = mi_value
+            row[band_name + '_phase_significance'] = signif
             mi_values_band_phase.append(mi_value)
-        # Compute z-scored MI values for this neuron
-        mi_values = np.array(mi_values)
-        mi_zscore = zscore(mi_values, nan_policy='omit')  # safe if NaNs exist
 
-        # Compute z-scored MI values for this neuron
-        mi_values_band = np.array(mi_values_band)
-        mi_zscore_band = zscore(mi_values_band, nan_policy='omit')  # safe if NaNs exist
+        # Z-scoring
+        mi_zscore = zscore(np.array(mi_values), nan_policy='omit')
+        mi_zscore_band = zscore(np.array(mi_values_band), nan_policy='omit')
+        mi_zscore_band_phase = zscore(np.array(mi_values_band_phase), nan_policy='omit')
 
-        # Compute z-scored MI values for this neuron
-        mi_values_band_phase = np.array(mi_values_band_phase)
-        mi_zscore_band_phase = zscore(mi_values_band_phase, nan_policy='omit')  # safe if NaNs exist
-
-        # Add z-scored MI values
         for beh_name, z_value in zip(beh_names, mi_zscore):
             row[f'{beh_name}_zscore'] = z_value
-
         for freq_band, z_val in zip(bands.keys(), mi_zscore_band):
             row[f'{freq_band}_amp_zscore'] = z_val
-
         for freq_band, z_val in zip(bands.keys(), mi_zscore_band_phase):
             row[f'{freq_band}_phase_zscore'] = z_val
 
         rows.append(row)
 
-# Create the DataFrame
 neuron_mi_df = pd.DataFrame(rows)
 
 
@@ -240,24 +310,21 @@ neuron_mi_df = pd.DataFrame(rows)
 #### PLOTING
 import seaborn as sns
 import matplotlib.pyplot as plt
-
-# Define MI variables (behavior + frequency)
-mi_vars = ['Position', 'DirPosition', 'MovDir',
-       'Speed', 'Time', 'InnerTime', 'TrialID', 'infra-slow_amp', 'delta_amp',
-       'theta_amp', 'slow-gamma_amp', 'high-gamma_amp', 'MUA_amp',
-       'infra-slow_phase', 'delta_phase', 'theta_phase', 'slow-gamma_phase',
-       'high-gamma_phase', 'MUA_phase']
-
-# Melt to long format for seaborn
-long_df = neuron_mi_df.melt(id_vars='area', value_vars=mi_vars,
-                            var_name='variable', value_name='MI_value')
-
+# Define MI variables and corresponding significance columns
+mi_vars = ['Position', 'DirPosition', 'MovDir', 'Speed', 'Time', 'InnerTime', 'TrialID',
+           'infra-slow_amp', 'delta_amp', 'theta_amp', 'slow-gamma_amp', 'ripple-band_amp', 'MUA_amp',
+           'infra-slow_phase', 'delta_phase', 'theta_phase', 'slow-gamma_phase', 'ripple-band_phase', 'MUA_phase']
+signif_vars = [f'{v}_significance' for v in mi_vars]
+# Keep only significant values
+signif_mask = np.full(len(neuron_mi_df), False)
+for mi, sig in zip(mi_vars, signif_vars):
+    signif_mask |= (neuron_mi_df[sig] == 's')
+signif_df = neuron_mi_df[signif_mask].copy()
+# Melt to long format
+long_df = signif_df.melt(id_vars='area', value_vars=mi_vars,
+                         var_name='variable', value_name='MI_value')
 # Keep only 'sup' and 'deep' areas
 long_df = long_df[long_df['area'].isin(['sup', 'deep'])]
-
-# Define custom palette
-palette = {'sup': 'purple', 'deep': 'gold'}
-
 # Plot
 plt.figure(figsize=(2 * len(mi_vars), 6))
 sns.boxenplot(
@@ -265,21 +332,20 @@ sns.boxenplot(
     x='variable',
     y='MI_value',
     hue='area',
-    palette=palette
+    palette={'sup': 'purple', 'deep': 'gold'}
 )
-
-plt.title("MI Distributions by Variable and Area")
+plt.title("Significant MI Distributions by Variable and Area")
 plt.xticks(rotation=45, ha='right')
 plt.ylabel("Mutual Information")
 plt.xlabel("Variable")
 plt.tight_layout()
-
 # Save
-violin_path = os.path.join(figure_directory, "MI_ViolinPlot.png")
+violin_path = os.path.join(figure_directory, "MI_Significant_Only_ViolinPlot.png")
 plt.savefig(violin_path, dpi=300)
+plt.show()
 plt.close()
-
 print(f"Saved violin plot to: {violin_path}")
+
 
 import os
 import numpy as np
@@ -353,14 +419,11 @@ plt.savefig(scatter_path, dpi=300)
 plt.close()
 print(f"Saved color-coded scatter grid with Pearson r to: {scatter_path}")
 
-# Create DataFrame of Pearson r values
 detailed_r_df = pd.DataFrame(detailed_pearson_data)
 
-# Set up subplot grid
 n_beh = len(beh_names)
 fig, axs = plt.subplots(n_beh, 1, figsize=(8, 3 * n_beh), sharex=True)
 
-# Ensure axs is iterable even if n_beh = 1
 if n_beh == 1:
     axs = [axs]
 
